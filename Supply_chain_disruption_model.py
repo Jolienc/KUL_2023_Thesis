@@ -187,7 +187,7 @@ class SimulationModel:
             equivalently, the daily amount of product from supplier j that is used by firm i.
         sector : numpy.array
             A vector specifying to which sector a firm belongs. Firm i belongs to the sector represented by index
-            sector[i].
+            sector[i]. The sector index should start at zero.
         C : numpy.array
             The daily trade volume from firm i to the final consumers is C[i].
         p : float, optional
@@ -259,9 +259,6 @@ class SimulationModel:
             Specifies whether to print the iteration number at the start of every iteration. (default is False)
         """
 
-        # the initial demand of each firm
-        # The demand in each firm i for the product of each other firm j is given by D[i][j].
-        D = self.init_capacity()
         # the initial realized demand of each firm
         # The realized demand in each firm i for the product of each other firm j is given by D_star[i][j]. This gives
         # the demand that has actually been met.
@@ -284,21 +281,16 @@ class SimulationModel:
             Pmax = self.max_capacity_tot(S, A_tot)
 
             # calculate the demand
+            # The demand in each firm i for the product of each other firm j is given by D[i][j].
             D = self.demand(O)
 
             # calculate the actual production capacity
-            # this could be stored as D_star since they are always equal, saves ~(dim) memory
-            # if you do this, be carefull with the calculation of S_target in the calc for realized demand
             Pact = self.actual_capacity(D, Pmax)
-            # there is no production in the damaged firms for the first sigma days after the disruption
-            if self.param["sigma"] > 0:
-                Pact[self.damaged_ind] = 0
 
             # calculate the realized demand and orders
             D_star, C_star, O_star = self.realized_demand(Pact, D, S, O)
+            # record the actual production capacity
             self.prod_cap.append(list(Pact))
-            # TODO: in the plots, you can see that Pact sometimes becomes negative before staying at zero for the rest
-            #  of the run. What causes this?
 
             # update the inventory
             S = self.update_inventory(D_star, O_star, S)
@@ -306,23 +298,18 @@ class SimulationModel:
             # record how many days the supply has been insufficient
             days_neg_S = self.update_days_neg_S(days_neg_S, S)
 
-            # remove firms that have zero realized demand
+            # remove firms that have zero realized demand (i.e., defaulted)
             if np.sum(Pact <= 0) > 0:
                 S = self.remove_firms(Pact, S, i)
 
-            # change suppliers if necessary
+            # replace suppliers if they have not been able to supply enough for more than `alpha` days
             change_supplier = (np.sum(days_neg_S > self.param["alpha"]) > 0)
             if change_supplier:
                 S = self.replace_supplier(Pact, Pmax, S, days_neg_S)
 
                 # update Pini, A_tot because self.A changed
-                # TODO: check whether changing Pini leads to problems with the logic of the model
-                #  if a client leaves, Pini will be smaller if changed at this point (because the entry in the A matrix
-                #  was removed), but in reality, the firm would not have a smaller production capacity after a client
-                #  leaves. Unless, we say that the production capacity decreases due to the revenue from that client
-                #  falling away
                 self.Pini = self.init_capacity()
-                self.Pini[self.Pini == 0] = 1
+                self.Pini[self.Pini == 0] = 1  # to avoid division by zero
                 A_tot = self.tot_consumption_sector()
 
             # calculate O for the next day
@@ -421,10 +408,10 @@ class SimulationModel:
         # the capacity before the disruption, or if the maximum capacity is greater than the demand
         healthy = np.array([(Pmax >= self.Pini) + (Pmax >= D)])
         # matrix of dimension (dim,dim), each row is the healthy array
-        # healthy_sup[i][j] : firm j is healthy
+        # healthy_sup[i][j] : firm j is healthy (bool)
         healthy_sup = np.repeat(healthy, self.dim(), axis=0)
         # matrix of dimension (dim,dim), each column is the healthy array
-        # healthy_cus[i][j] : firm i is healthy
+        # healthy_cus[i][j] : firm i is healthy (bool)
         healthy_cus = np.repeat(np.transpose(healthy), self.dim(), axis=1)
 
         # nb_sup_healthy[i] : nb of healthy suppliers firm i has
@@ -434,7 +421,7 @@ class SimulationModel:
         # nb_neigh_healthy[i] : nb of healthy neighbours firm i has
         nb_neigh_healthy = nb_sup_healthy + nb_cus_healthy
 
-        # damping factor: ration of number of healthy neighbours to total number of neighbours
+        # damping factor: ratio of number of healthy neighbours to total number of neighbours
         nb_neigh[nb_neigh == 0] = 1  # to avoid zero division, won't affect results
         zeta = nb_neigh_healthy / nb_neigh
 
@@ -454,9 +441,10 @@ class SimulationModel:
     def current_capacity(self):
         # Pcap[i] : the production capacity of firm i, defined as its maximum production assuming no supply shortages
         Pcap = self.Pini_full_util * (1 - self.delta)
-        # firms that were damaged cannot perform at full utilisation capacity until they start recovering
+
+        # there is no production in the damaged firms for the first sigma days after the disruption
         if self.param["sigma"] > 0:
-            Pcap[self.damaged_ind] = self.Pini[self.damaged_ind] * (1 - self.delta[self.damaged_ind])
+            Pcap[self.damaged_ind] = 0
 
         return Pcap
 
@@ -494,6 +482,16 @@ class SimulationModel:
 
     def get_prod_capacity(self):
         return np.copy(self.prod_cap)
+
+    def group_failing_suppliers_by_sector(self, days_neg_S):
+        # which suppliers do we want to replace
+        ind_supp_repl = np.array(range(self.dim()))[days_neg_S > self.param["alpha"]]
+        # sectors of these suppliers
+        supp_sectors = list(set(self.sector[ind_supp_repl]))
+        # group these in a dictionary, where the keys are the sectors,
+        # the values a list of the suppliers in that sector
+        sec_dict = {s: [supp for supp in ind_supp_repl if self.sector[supp] == s] for s in supp_sectors}
+        return sec_dict
 
     def init_capacity(self):
         # Pini[i] : initial production of firm i in a day
@@ -641,15 +639,24 @@ class SimulationModel:
 
         fig.show()
 
+    def potential_suppliers_and_capacity(self, ind_not_i, sec, Pmax, Pact):
+        # look for all firms in the same sector/competitors of the to be replaced suppliers
+        potential_supp = np.array([ind for ind in ind_not_i if self.sector[ind] == sec])
+        # calculate their free capacity
+        Pfree = np.min((np.zeros(len(potential_supp)), Pmax[potential_supp] - Pact[potential_supp]), axis=0)
+        # filter out the potential suppliers with Pfree == 0
+        available = (Pfree > 0)
+        potential_supp = potential_supp[available]
+        Pfree = Pfree[available]
+        return potential_supp, Pfree
+
     def realized_demand(self, Pact, D, S, O):
         # indices of firms where production capacity is equal to or greater than the demand
         ind_demand_met = (Pact >= D)
-
         # indices of firms where production is insufficients for the demand
         ind_demand_not_met = (Pact < D)
 
         # realized demand (demand met)
-
         D_star = np.zeros(self.dim())
         D_star[ind_demand_met] = D[ind_demand_met]
 
@@ -660,8 +667,7 @@ class SimulationModel:
         O_star_T[ind_demand_met] = np.transpose(O)[ind_demand_met]
 
         # realized demand (demand not met)
-
-        target_S = self.target_inventory(D_star)  # use different formula?
+        target_S = self.target_inventory(D_star)  # TODO: use different formula?
         O_pre_disr = self.A + (1 / self.param["tau"]) * (target_S - S)
 
         for i in np.array(range(self.dim()))[ind_demand_not_met]:
@@ -681,12 +687,15 @@ class SimulationModel:
         #  done: idea, remove dependence in A of the to be removed firm on the staying firms, leave the dependence of
         #  the remaining firms on the to be removed firms. Set Pini and Pini_full_util to zero for the to be removed
         #  firms, set the inventory in possession of the to be removed firms to zero
+
         ind_firms_repl = np.array(range(self.dim()))[Pact <= 0]
+        # filter out firms that have already defaulted and been removed
+        # for the first `sigma` days, the firms hit by the disruption do not produce, these should not be removed even
+        # though they have `Pact == 0`
         if self.param["sigma"] > 0:
             ind_firms_repl = [i for i in ind_firms_repl if i not in self.defaults.keys() and i not in self.damaged_ind]
         else:
             ind_firms_repl = [i for i in ind_firms_repl if i not in self.defaults.keys()]
-
 
         # set rows in A to zero (the removed firms won't receive trade volume anymore)
         self.A[ind_firms_repl] = np.zeros(self.dim())
@@ -707,49 +716,31 @@ class SimulationModel:
         for i in ind_firms_repl:
             self.defaults[i] = default_time
 
+        # return the updated inventory matrix
         return S
 
     def replace_supplier(self, Pact, Pmax, S, days_neg_S):
-        # indices of firms who want to replace one or more suppliers
+        # indices of firms who want to replace one or more suppliers (they have had a negative amount of supply of at
+        # least one supplier, for more than `alpha` days)
         ind_customers = np.array(range(self.dim()))[np.sum(days_neg_S > self.param["alpha"], axis=1) > 0]
-
         for i in ind_customers:
             # list of indices of firms which are not firm i
             ind_not_i = list(range(i)) + list(range(i + 1, self.dim()))
-            # which suppliers do we want to replace
-            ind_supp_repl = np.array(range(self.dim()))[days_neg_S[i] > self.param["alpha"]]
-            # sectors of these suppliers
-            supp_sectors = list(set(self.sector[ind_supp_repl]))
-            # group these in a dictionary, where the keys are the sectors,
-            # the values a list of the suppliers in that sector
-            sec_dict = {s: [supp for supp in ind_supp_repl if self.sector[supp] == s] for s in supp_sectors}
+            # dictionary of the suppliers that need to be replaced, grouped by their sector
+            # key: sector index, value: list of firm indices of the failing suppliers in that sector
+            sec_dict = self.group_failing_suppliers_by_sector(days_neg_S[i])
 
             # for loop over the sectors
             for sec, supp_list in sec_dict.items():
-                # look for all firms in the same sector/competitors of the to be replaced suppliers
-                potential_supp = np.array([ind for ind in ind_not_i if self.sector[ind] == sec])
-                # calculate their free capacity
-                Pfree = np.min((np.zeros(len(potential_supp)), Pmax[potential_supp] - Pact[potential_supp]), axis=0)
-                # filter out the potential suppliers with Pfree == 0
-                available = (Pfree > 0)
-
-                potential_supp = potential_supp[available]
-                Pfree = Pfree[available]
+                # indices of the potential suppliers and their free production capacity
+                potential_supp, Pfree = self.potential_suppliers_and_capacity(ind_not_i, sec, Pmax, Pact)
 
                 # sum the A_i,j between the firm and the to be replaced suppliers, this is what needs to be
                 # attributed to the new suppliers
                 A_repl = np.sum(self.A[i][supp_list])
 
                 if A_repl > 0:
-                    # sort the potential suppliers to determine the new suppliers
-                    # sorted by decreasing Pfree
-                    existing_supp = potential_supp[self.A[i][potential_supp] > 0]
-                    new_supp = potential_supp[self.A[i][potential_supp] == 0]
-                    existing_supp_sorted = sorted(existing_supp, key=lambda supp: Pfree[supp], reverse=True)
-                    new_supp_sorted = sorted(new_supp, key=lambda supp: Pfree[supp], reverse=True)
-                    total_supp_sorted = existing_supp_sorted + new_supp_sorted
-                    total_Pfree_sorted = Pfree[total_supp_sorted]
-                    Pfree_cumsum = np.cumsum(total_Pfree_sorted)
+                    supp_sorted, Pfree_sorted, Pfree_cumsum = self.sort_potential_suppliers(i, potential_supp, Pfree)
                     # returns the first index such that Pfree_cumsum[k] >= A_repl,
                     # else returns len(Pfree_cumsum)-1, i.e., if sum(Pfree) < A_repl
                     last_needed_supp = next((k for k, val in enumerate(Pfree_cumsum) if val >= A_repl),
@@ -757,7 +748,7 @@ class SimulationModel:
 
                     if last_needed_supp >= 0:  # there are potential suppliers available
                         # chosen suppliers
-                        supp_chosen = total_supp_sorted[0:(last_needed_supp + 1)]
+                        supp_chosen = supp_sorted[0:(last_needed_supp + 1)]
                         # TODO: check whether these calculations/reasoning are/is correct
                         #  how do we deal with the not covered A_repl? What if no other suppliers have free capacity?
                         #  maybe always divide the needed trade volume (i.e. the ordered amount) over all existing
@@ -769,7 +760,7 @@ class SimulationModel:
                         A_repl_not_covered = np.min((A_repl - Pfree_cumsum[last_needed_supp], 0))
                         # update the A matrix
                         self.A[i][supp_list] = A_repl_not_covered * self.A[i][supp_list] / A_repl
-                        self.A[i][supp_chosen[0:last_needed_supp]] += total_Pfree_sorted[0:last_needed_supp]
+                        self.A[i][supp_chosen[0:last_needed_supp]] += Pfree_sorted[0:last_needed_supp]
                         volume_left = A_repl - A_repl_not_covered - Pfree_cumsum[last_needed_supp - 1]
                         self.A[i][supp_chosen[last_needed_supp]] += volume_left
                         # calculate the proportions, these are used to divide the negative supply
@@ -812,9 +803,26 @@ class SimulationModel:
         # nb days of product each firm has in inventory at start
         n_start = np.round(np.random.rand(self.dim()) * self.n)
         n_start[n_start == 0] = 1  # always start with some inventory
-        # S[i,j] : firm i has an inventory of the intermediate goods produced by firm j on day t
+        # S[i][j] : firm i has an inventory of the intermediate goods produced by firm j on day t
         S = np.transpose(n_start * np.transpose(self.A))
         return S
+
+    def sort_potential_suppliers(self, i, potential_supp, Pfree):
+        # sort the potential suppliers to determine the new suppliers
+        # sorted by decreasing Pfree
+        indices = np.array(range(len(potential_supp)))
+        existing_ind = indices[self.A[i][potential_supp] > 0]
+        new_ind = indices[self.A[i][potential_supp] == 0]
+
+        existing_ind_sorted = sorted(existing_ind, key=lambda ind: Pfree[ind], reverse=True)
+        new_ind_sorted = sorted(new_ind, key=lambda ind: Pfree[ind], reverse=True)
+        total_ind_sorted = existing_ind_sorted + new_ind_sorted
+
+        total_supp_sorted = potential_supp[total_ind_sorted]
+        total_Pfree_sorted = Pfree[total_ind_sorted]
+        Pfree_cumsum = np.cumsum(total_Pfree_sorted)
+
+        return total_supp_sorted, total_Pfree_sorted, Pfree_cumsum
 
     def target_inventory(self, D_star):
         target_S = np.transpose(self.n * np.transpose(self.A)) * D_star / self.Pini
@@ -822,14 +830,13 @@ class SimulationModel:
         return target_S
 
     def tot_inventory_sector(self, S):
-        # S_tot[i,j] : total inventory in firm i of product of sector j
+        # S_tot[i][j] : total inventory in firm i of product of sector j
         S_tot = np.zeros((self.nb_s(), self.dim()))
 
         for i in range(self.nb_s()):
             S_tot[i] = np.sum(np.transpose(np.transpose(S)[np.array(self.sector) == i]), axis=1)
 
-        S_tot = np.transpose(S_tot)
-        return S_tot
+        return np.transpose(S_tot)
 
     def tot_consumption_sector(self):
         # A_tot[i][j] : total consumption in firm i of product of sector j
@@ -838,8 +845,7 @@ class SimulationModel:
         for i in range(self.nb_s()):
             A_tot[i] = np.sum(np.transpose(np.transpose(self.A)[np.array(self.sector) == i]), axis=1)
 
-        A_tot = np.transpose(A_tot)
-        return A_tot
+        return np.transpose(A_tot)
 
     def update_days_neg_S(self, days_neg_S, S):
         # it's not enough to know a firm has not been able to deliver enough for a certain
