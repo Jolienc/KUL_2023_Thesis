@@ -33,6 +33,8 @@ def generate_data(dim, nb_s):
         A tuple of numpy.arrays consisting of the signed adjacency matrix, the vector of daily trade volume to final
         consumers, and the vector specifying the sector of each firm.
     """
+    # TODO: matrix has a lot of zeros (mainly/especially for small dim)
+
     # TODO: according to how A is formed, two firms in the same sector are not competitors if one supplies to the other
     #  (or both do), but with how new suppliers are searched for, they actually would be competitors, since they are in
     #  in the same sector
@@ -272,9 +274,9 @@ class SimulationModel:
         # days_neg_S[i][j] : number of days firm i's inventory of product from firm j has been negative
         days_neg_S = np.zeros((self.dim(), self.dim()))
 
-        for i in range(self.param["nb_iter"]):
+        for it in range(self.param["nb_iter"]):
             if print_iter:
-                print(f"iteration {i + 1}/{self.param['nb_iter']}")
+                print(f"iteration {it + 1}/{self.param['nb_iter']}")
 
             # max production capacity limited by amount of damage and inventory
             Pmax = self.max_capacity_tot(S, A_tot)
@@ -295,12 +297,12 @@ class SimulationModel:
 
             # remove firms that have zero realized demand (i.e., defaulted)
             if np.sum(Pact <= 0) > 0:
-                S = self.remove_firms(Pact, S, i)
+                S, days_neg_S = self.remove_firms(Pact, S, days_neg_S, it)
 
             # replace suppliers if they have not been able to supply enough for more than `alpha` days
             change_supplier = (np.sum(days_neg_S > self.param["alpha"]) > 0)
             if change_supplier:
-                S = self.replace_supplier(Pact, Pmax, S, days_neg_S)
+                S, days_neg_S = self.replace_supplier(Pact, Pmax, S, days_neg_S, it)
 
                 # update Pini, A_tot because self.A changed
                 self.Pini = self.init_capacity()
@@ -485,6 +487,9 @@ class SimulationModel:
         else:  # there are no potential suppliers available
             A_repl_not_covered = A_repl
 
+        # divide the amount of daily trade volume that could not be covered by free capacity over all the current
+        # suppliers
+
         defaulted_vol = 0
         for j in supp_list:
             if j in self.defaults.keys():
@@ -496,14 +501,17 @@ class SimulationModel:
                 self.A[i][j] = 0
 
         # calculate the proportional division of the trade volume over the suppliers
-        total_trade_vol = np.sum(self.A[i])
-        prop_trade_vol = self.A[i] / total_trade_vol
-        # set the trade vol from the to be replace suppliers to zero
-        self.A[i][supp_list] = 0
-        # redivide A_repl_not_covered and the trade volume of the defaulted suppliers according to the trade volume
-        # proportions
-        self.A[i] += prop_trade_vol * (A_repl_not_covered + defaulted_vol)
-        return total_trade_vol
+        total_trade_vol_no_default = np.sum(self.A[i])
+        # check whether the firm has available suppliers that have not defaulted
+        firm_has_suppliers = (total_trade_vol_no_default > 0)
+        if firm_has_suppliers:
+            prop_trade_vol = self.A[i] / total_trade_vol_no_default
+            # set the trade vol from the to be replace suppliers to zero
+            self.A[i][supp_list] = 0
+            # redivide A_repl_not_covered and the trade volume of the defaulted suppliers according to the trade volume
+            # proportions
+            self.A[i] += prop_trade_vol * (A_repl_not_covered + defaulted_vol)
+        return firm_has_suppliers
 
     def get_prod_capacity(self):
         return np.copy(self.prod_cap)
@@ -696,7 +704,31 @@ class SimulationModel:
                 D_star[i], C_star[i], O_star_T[i] = 0, 0, 0
         return D_star, C_star, np.transpose(O_star_T)
 
-    def remove_firms(self, Pact, S, default_time):
+    def remove_firm_no_suppliers(self, i, S, days_neg_S, default_time):
+        # set row in A to zero (the removed firms won't receive trade volume anymore), should already be true
+        self.A[i] = np.zeros(self.dim())
+        # set production capacity to zero
+        # Pini is set to one, because if this is set to zero, you divide by zero in some of the calculations.
+        # Instead, where necessary, the relevant values will be set to zero using self.defaulted
+        self.Pini[i] = 1
+        self.Pini_full_util[i] = 0
+
+        # TODO: allow other firms to take over the inventory? (copied from remove_firms)
+        # set the removed firm's inventory to zero
+        S[i] = np.zeros(self.dim())
+        # set days_neg_S to be greater than alpha, such that customers of the removed firms will look for new suppliers
+        # customer indices of the removed firm
+        customers_ind = np.array(range(self.dim()))[np.transpose(self.A)[i] > 0]
+        if len(customers_ind) > 0:  # if the firm has customers
+            days_neg_S[customers_ind, i] = self.param["alpha"] + 1
+        # TODO: leave like this? or let final consumers look for new suppliers? (copied from remove_firms)
+        self.C[i] = 0
+        # add the indices to the firms that have defaulted
+        self.defaults[i] = default_time
+        # return the updated inventory matrix
+        return S, days_neg_S
+
+    def remove_firms(self, Pact, S, days_neg_S, default_time):
         # if a firm has a realized demand of zero, remove it from the network, how to deal with the customers?
         # A entries for the to be removed firm are set to zero, the inventory of product of this firm is set to zero
         # if there was a negative supply in S, it is divided over other suppliers in the same sector. if there was
@@ -725,6 +757,12 @@ class SimulationModel:
         # TODO: allow other firms to take over the inventory?
         # set the removed firms' inventory to zero
         S[ind_firms_repl] = np.zeros(self.dim())
+        # set days_neg_S to be greater than alpha, such that customers of the removed firms will look for new suppliers
+        for removed_firm_ind in ind_firms_repl:
+            # customer indices of the removed firm
+            customers_ind = np.array(range(self.dim()))[np.transpose(self.A)[removed_firm_ind] > 0]
+            if len(customers_ind) > 0:  # if the firm has customers
+                days_neg_S[customers_ind, removed_firm_ind] = self.param["alpha"] + 1
 
         # TODO: leave like this? or let final consumers look for new suppliers?
         self.C[ind_firms_repl] = 0
@@ -734,9 +772,9 @@ class SimulationModel:
             self.defaults[i] = default_time
 
         # return the updated inventory matrix
-        return S
+        return S, days_neg_S
 
-    def replace_supplier(self, Pact, Pmax, S, days_neg_S):
+    def replace_supplier(self, Pact, Pmax, S, days_neg_S, it):
         # indices of firms who want to replace one or more suppliers (they have had a negative amount of supply of at
         # least one supplier, for more than `alpha` days)
         ind_customers = np.array(range(self.dim()))[np.sum(days_neg_S > self.param["alpha"], axis=1) > 0]
@@ -758,13 +796,18 @@ class SimulationModel:
 
                 if A_repl > 0:
                     # divide the trade volume over the potential suppliers
-                    total_trade_vol = self.divide_trade_volume(i, supp_list, A_repl, potential_supp, Pfree)
-                    # update the S matrix: divide the negative inventory over the new suppliers according to the new
-                    # trade volume proportions
-                    S_rediv = np.sum(S[i][supp_list])
-                    new_prop_trade_vol = self.A[i] / total_trade_vol
-                    S[i] += new_prop_trade_vol * S_rediv
-        return S
+                    firm_has_suppliers = self.divide_trade_volume(i, supp_list, A_repl, potential_supp, Pfree)
+                    if firm_has_suppliers:
+                        # update the S matrix: divide the negative inventory over the new suppliers according to the new
+                        # trade volume proportions
+                        S_rediv = np.sum(S[i][supp_list])
+                        S[i][supp_list] = 0
+                        new_prop_trade_vol = self.A[i] / np.sum(self.A[i])
+                        S[i] += new_prop_trade_vol * S_rediv
+                    else:
+                        # if a firm was not able to find any suppliers, it is removed
+                        S, days_neg_S = self.remove_firm_no_suppliers(i, S, days_neg_S, it)
+        return S, days_neg_S
 
     def setup_inventory(self):
         # nb days of product each firm has in inventory at start
