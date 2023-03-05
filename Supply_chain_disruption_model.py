@@ -267,9 +267,8 @@ class SimulationModel:
         S = self.setup_inventory()
         # the initial orders
         O = self.orders(self.target_inventory(D_star), S, D_star)
-
+        # the intial total consumption
         A_tot = self.tot_consumption_sector()
-
         # days_neg_S[i][j] : number of days firm i's inventory of product from firm j has been negative
         days_neg_S = np.zeros((self.dim(), self.dim()))
 
@@ -279,14 +278,11 @@ class SimulationModel:
 
             # max production capacity limited by amount of damage and inventory
             Pmax = self.max_capacity_tot(S, A_tot)
-
             # calculate the demand
             # The demand in each firm i for the product of each other firm j is given by D[i][j].
             D = self.demand(O)
-
             # calculate the actual production capacity
             Pact = self.actual_capacity(D, Pmax)
-
             # calculate the realized demand and orders
             D_star, C_star, O_star = self.realized_demand(Pact, D, S, O)
             # record the actual production capacity
@@ -294,7 +290,6 @@ class SimulationModel:
 
             # update the inventory
             S = self.update_inventory(D_star, O_star, S)
-
             # record how many days the supply has been insufficient
             days_neg_S = self.update_days_neg_S(days_neg_S, S)
 
@@ -315,18 +310,11 @@ class SimulationModel:
             # calculate O for the next day
             target_S = self.target_inventory(D_star)
             O = self.orders(target_S, S, D_star)
-
             # update the damage
-            damaged_firms = (np.sum(self.delta) > 0)
-            days_left_without_recovery = self.param["sigma"]
-            if damaged_firms and (days_left_without_recovery == 0):
-                # firms recover from some damage
-                self.delta = self.update_delta(Pmax, D)
-            elif days_left_without_recovery > 0:
-                # decrease the nb of days without recovery
-                self.param["sigma"] -= 1
+            self.update_damage(Pmax, D)
 
-    def actual_capacity(self, D, Pmax):
+    @staticmethod
+    def actual_capacity(D, Pmax):
         # Pact[i] : the actual production of firm i on day t
         Pact = np.min((D, Pmax), axis=0)
         return Pact
@@ -336,7 +324,6 @@ class SimulationModel:
 
         # c = C[i]
         O_rel_c = 1
-
         # O_pre_disr = A + (1/tau) * (target_S - S)
         # O_pre_ji = np.transpose(O_pre_disr)[i]
         # O_now_ji = np.transpose(O)[i]
@@ -424,7 +411,6 @@ class SimulationModel:
         # damping factor: ratio of number of healthy neighbours to total number of neighbours
         nb_neigh[nb_neigh == 0] = 1  # to avoid zero division, won't affect results
         zeta = nb_neigh_healthy / nb_neigh
-
         return zeta
 
     def cap_full_util(self, u):
@@ -441,11 +427,9 @@ class SimulationModel:
     def current_capacity(self):
         # Pcap[i] : the production capacity of firm i, defined as its maximum production assuming no supply shortages
         Pcap = self.Pini_full_util * (1 - self.delta)
-
         # there is no production in the damaged firms for the first sigma days after the disruption
         if self.param["sigma"] > 0:
             Pcap[self.damaged_ind] = 0
-
         return Pcap
 
     def demand(self, O):
@@ -480,6 +464,47 @@ class SimulationModel:
         delta[damaged_ind] = damage
         return delta
 
+    def divide_trade_volume(self, i, supp_list, A_repl, potential_supp, Pfree):
+        # sort the suppliers according to free production capacity and whether there is a preexisting relationship
+        supp_sorted, Pfree_sorted, Pfree_cumsum = self.sort_potential_suppliers(i, potential_supp, Pfree)
+        # returns the first index such that Pfree_cumsum[k] >= A_repl, else returns len(Pfree_cumsum)-1, i.e., if
+        # sum(Pfree) < A_repl
+        last_needed_supp = next((k for k, val in enumerate(Pfree_cumsum) if val >= A_repl), len(Pfree_cumsum) - 1)
+        if last_needed_supp >= 0:  # there are potential suppliers available (len(Pfree_cumsum) > 0)
+            # what amount of A_repl cannot be covered by the free capacity of suppliers
+            A_repl_not_covered = np.min((A_repl - Pfree_cumsum[last_needed_supp], 0))
+            # When A_repl cannot be fully covered, it is divided over all current suppliers, proportionally to the
+            # daily trade volume.
+            # first leave all of A_repl_not_covered with the to be replaced suppliers
+            # divide it proportionally to the original amount of trade volume
+            self.A[i][supp_list] = A_repl_not_covered * self.A[i][supp_list] / A_repl
+            # fill out the free capacity of the selected suppliers
+            self.A[i][supp_sorted[0:last_needed_supp]] += Pfree_sorted[0:last_needed_supp]
+            volume_left = A_repl - A_repl_not_covered - Pfree_cumsum[last_needed_supp - 1]
+            self.A[i][supp_sorted[last_needed_supp]] += volume_left
+        else:  # there are no potential suppliers available
+            A_repl_not_covered = A_repl
+
+        defaulted_vol = 0
+        for j in supp_list:
+            if j in self.defaults.keys():
+                # if firm j has defaulted, the trade volume it delivered will be counted in total_trade_vol,
+                # but by setting A[i][j] to zero here, we ensure that no new trade volume will be attributed
+                # to the defaulted firm. Instead, the trade volume that would have been attributed to firm j
+                # is divided over the other firms in the below steps
+                defaulted_vol += self.A[i][j]
+                self.A[i][j] = 0
+
+        # calculate the proportional division of the trade volume over the suppliers
+        total_trade_vol = np.sum(self.A[i])
+        prop_trade_vol = self.A[i] / total_trade_vol
+        # set the trade vol from the to be replace suppliers to zero
+        self.A[i][supp_list] = 0
+        # redivide A_repl_not_covered and the trade volume of the defaulted suppliers according to the trade volume
+        # proportions
+        self.A[i] += prop_trade_vol * (A_repl_not_covered + defaulted_vol)
+        return total_trade_vol
+
     def get_prod_capacity(self):
         return np.copy(self.prod_cap)
 
@@ -510,21 +535,15 @@ class SimulationModel:
             S_tot[ind_zero] = np.max(S_tot)
             Ppro = np.transpose(np.transpose(S_tot / A_tot) * self.Pini)
             A_tot[ind_zero] = 0
-
         else:
             Ppro = np.transpose(np.transpose(S_tot / A_tot) * self.Pini)
-
         return Ppro
 
     def max_capacity_tot(self, S, A_tot):
-
         # the current production capacity, taking into account damage from the disruption
         Pcap = self.current_capacity()
-
         S_tot = self.tot_inventory_sector(S)
-
         Ppro = self.max_capacity_inventory(S_tot, A_tot)
-
         # Pmax[i] : maximum possible production of firm i on day t is limited by the production capacity
         # (infrastructure, workforce, etc.) and production constraints due to supply shortages
         Ppro_min = np.min(Ppro, axis=1)
@@ -659,10 +678,8 @@ class SimulationModel:
         # realized demand (demand met)
         D_star = np.zeros(self.dim())
         D_star[ind_demand_met] = D[ind_demand_met]
-
         C_star = np.zeros(self.dim())
         C_star[ind_demand_met] = self.C[ind_demand_met]
-
         O_star_T = np.zeros((self.dim(), self.dim()))  # transposed (O_ji)
         O_star_T[ind_demand_met] = np.transpose(O)[ind_demand_met]
 
@@ -740,61 +757,11 @@ class SimulationModel:
                 A_repl = np.sum(self.A[i][supp_list])
 
                 if A_repl > 0:
-                    supp_sorted, Pfree_sorted, Pfree_cumsum = self.sort_potential_suppliers(i, potential_supp, Pfree)
-                    # returns the first index such that Pfree_cumsum[k] >= A_repl,
-                    # else returns len(Pfree_cumsum)-1, i.e., if sum(Pfree) < A_repl
-                    last_needed_supp = next((k for k, val in enumerate(Pfree_cumsum) if val >= A_repl),
-                                            len(Pfree_cumsum) - 1)
-
-                    if last_needed_supp >= 0:  # there are potential suppliers available
-                        # chosen suppliers
-                        supp_chosen = supp_sorted[0:(last_needed_supp + 1)]
-                        # TODO: check whether these calculations/reasoning are/is correct
-                        #  how do we deal with the not covered A_repl? What if no other suppliers have free capacity?
-                        #  maybe always divide the needed trade volume (i.e. the ordered amount) over all existing
-                        #  suppliers? you can't divide it over non-preexisting suppliers, because they won't take on new
-                        #  customers, but you can increase your orders to pre-existing suppliers.
-                        #  --> instead of putting A_repl_not_covered back on the suppliers we wanted to replace, we
-                        #  divide it over all current suppliers
-                        # first leave all of A_repl_not_covered with the to be replaced suppliers
-                        A_repl_not_covered = np.min((A_repl - Pfree_cumsum[last_needed_supp], 0))
-                        # update the A matrix
-                        self.A[i][supp_list] = A_repl_not_covered * self.A[i][supp_list] / A_repl
-                        self.A[i][supp_chosen[0:last_needed_supp]] += Pfree_sorted[0:last_needed_supp]
-                        volume_left = A_repl - A_repl_not_covered - Pfree_cumsum[last_needed_supp - 1]
-                        self.A[i][supp_chosen[last_needed_supp]] += volume_left
-                        # calculate the proportions, these are used to divide the negative supply
-                        #proportions = self.A[i][supp_chosen] / (A_repl - A_repl_not_covered)
-
-                    else:  # there are no potential suppliers available
-                        A_repl_not_covered = A_repl
-
-                    # redivide A_repl_not_covered over all current suppliers
-                    total_trade_vol = np.sum(self.A[i])
-
-                    defaulted_vol = 0
-                    for j in supp_list:
-                        if j in self.defaults.keys():
-                            # if firm j has defaulted, the trade volume it delivered will be counted in total_trade_vol,
-                            # but by setting A[i][j] to zero here, we ensure that no new trade volume will be attributed to
-                            # the defaulted firm. Instead, the trade volume that would have been attributed to firm j is
-                            # divided over the other firms in the below steps
-                            defaulted_vol += self.A[i][j]
-                            self.A[i][j] = 0
-
-                    prop_trade_vol = self.A[i] / total_trade_vol
-                    # set the trade vol from the to be replace suppliers to zero
-                    self.A[i][supp_list] = 0
-                    # redivide A_repl_not_covered according to the trade volume proportions
-                    self.A[i] += prop_trade_vol * (A_repl_not_covered + defaulted_vol)
-
+                    # divide the trade volume over the potential suppliers
+                    total_trade_vol = self.divide_trade_volume(i, supp_list, A_repl, potential_supp, Pfree)
                     # update the S matrix: divide the negative inventory over the new suppliers according to the new
                     # trade volume proportions
                     S_rediv = np.sum(S[i][supp_list])
-                    #S_rediv_not_covered = (A_repl_not_covered / A_repl) * S_rediv
-                    #S_rediv_covered = (1 - A_repl_not_covered / A_repl) * S_rediv
-                    #self.S[i][supp_list] = S_rediv_not_covered * self.A[i][supp_list] / A_repl
-                    #self.S[i][supp_chosen] += S_rediv_covered * proportions
                     new_prop_trade_vol = self.A[i] / total_trade_vol
                     S[i] += new_prop_trade_vol * S_rediv
         return S
@@ -821,7 +788,6 @@ class SimulationModel:
         total_supp_sorted = potential_supp[total_ind_sorted]
         total_Pfree_sorted = Pfree[total_ind_sorted]
         Pfree_cumsum = np.cumsum(total_Pfree_sorted)
-
         return total_supp_sorted, total_Pfree_sorted, Pfree_cumsum
 
     def target_inventory(self, D_star):
@@ -832,37 +798,36 @@ class SimulationModel:
     def tot_inventory_sector(self, S):
         # S_tot[i][j] : total inventory in firm i of product of sector j
         S_tot = np.zeros((self.nb_s(), self.dim()))
-
         for i in range(self.nb_s()):
             S_tot[i] = np.sum(np.transpose(np.transpose(S)[np.array(self.sector) == i]), axis=1)
-
         return np.transpose(S_tot)
 
     def tot_consumption_sector(self):
         # A_tot[i][j] : total consumption in firm i of product of sector j
         A_tot = np.zeros((self.nb_s(), self.dim()))
-
         for i in range(self.nb_s()):
             A_tot[i] = np.sum(np.transpose(np.transpose(self.A)[np.array(self.sector) == i]), axis=1)
-
         return np.transpose(A_tot)
 
-    def update_days_neg_S(self, days_neg_S, S):
-        # it's not enough to know a firm has not been able to deliver enough for a certain
-        # number of days, you need to know to whom they have not delivered, otherwise you
-        # don't know by whom they're being replaced, i.e., you need a matrix, not a vector
+    def update_damage(self, Pmax, D):
+        damaged_firms = (np.sum(self.delta) > 0)
+        days_left_without_recovery = self.param["sigma"]
+        if damaged_firms and (days_left_without_recovery == 0):
+            # firms recover from some damage
+            self.delta = self.update_delta(Pmax, D)
+        elif days_left_without_recovery > 0:
+            # decrease the nb of days without recovery
+            self.param["sigma"] -= 1
 
+    def update_days_neg_S(self, days_neg_S, S):
         # indices of the firms who can't deliver enough supply
         ind_neg = (S < 0)
-
         # if a firm that has (days_neg_S > 0) now has a positive supply, set days_neg_S to zero
         ind_pos = ~ind_neg
         set_to_zero = ind_pos * (days_neg_S > 0)
         days_neg_S[set_to_zero] = 0
-
         # increment the number of days with negative supply
         days_neg_S[ind_neg] += 1
-
         return days_neg_S
 
     def update_delta(self, Pmax, D):
