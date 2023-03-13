@@ -230,6 +230,7 @@ class SimulationModel:
 
         # vector of target inventory for each firm, expressed in number of days of product use
         self.n = poisson.rvs(mu=k, size=self.dim())
+        self.n[self.n <= 0] = 1  # always have some target value
         # dictionary with simulation parameters
         self.param = {"gamma": gamma, "tau": tau, "sigma": sigma, "alpha": alpha, "nb_iter": nb_iter}
 
@@ -611,7 +612,41 @@ class SimulationModel:
         )
         fig.show()
 
-    def plot_act_capacity(self, filter_firms=True, col_by_sector=True):
+    def plot_act_capacity(self, col_by_sector=True):
+        x = list(range(self.param["nb_iter"] + 1))
+
+        # get production capacity
+        y = self.get_prod_capacity()
+
+        # filter out firms that have always rel cap == 1
+        tr_y = np.transpose(y)
+        select_firms = np.array(range(self.dim()))
+        data = tr_y[select_firms]
+        firm_indices = np.array(range(self.dim()))[select_firms]
+
+        # build plot df
+        plot_df = pd.DataFrame(data.reshape(-1, 1), columns=["rel_prod_cap"])
+        plot_df["x"] = x * len(firm_indices)
+        ind_start = 0
+        for ind in firm_indices:
+            plot_df.loc[ind_start:(ind_start + self.param["nb_iter"]), "sector"] = self.sector[ind]
+            plot_df.loc[ind_start:(ind_start + self.param["nb_iter"]), "firm"] = ind
+            ind_start += self.param["nb_iter"] + 1
+
+        # plot
+        if col_by_sector:
+            fig = px.line(plot_df, x="x", y="rel_prod_cap", color='sector', line_group="firm")
+
+        else:
+            fig = px.line(plot_df, x="x", y="rel_prod_cap", color="firm")
+
+        fig.update_layout(
+            xaxis_title="t (days)",
+            yaxis_title="Relative production capacity"
+        )
+        fig.show()
+
+    def plot_act_capacity2(self, filter_firms=True, col_by_sector=True):
         # TODO: make more efficient (repeating code from prev plotting function)
         # TODO: issue with selecting lines by clicking on the labels, deselecting a sector does not make all lines
         #  disappear
@@ -810,9 +845,11 @@ class SimulationModel:
         return S, days_neg_S
 
     def setup_inventory(self):
+        # TODO: add an option to choose whether initial inventory is max or random
         # nb days of product each firm has in inventory at start
         n_start = np.round(np.random.rand(self.dim()) * self.n)
         n_start[n_start == 0] = 1  # always start with some inventory
+        #n_start = self.n
         # S[i][j] : firm i has an inventory of the intermediate goods produced by firm j on day t
         S = np.transpose(n_start * np.transpose(self.A))
         return S
@@ -834,7 +871,11 @@ class SimulationModel:
         return total_supp_sorted, total_Pfree_sorted, Pfree_cumsum
 
     def target_inventory(self, D_star):
-        target_S = np.transpose(self.n * np.transpose(self.A)) * D_star / self.Pini
+        # TODO: add option to choose which formula is used
+        #target_S = np.transpose(self.n * np.transpose(self.A)) * D_star / self.Pini
+        target_S = np.transpose(self.n * np.transpose(self.A))
+        #print(D_star / self.Pini)
+        #print(np.sum(np.transpose(self.n * np.transpose(self.A)) - target_S),'\n')
         target_S[list(self.defaults.keys())] = np.zeros(self.dim())
         return target_S
 
