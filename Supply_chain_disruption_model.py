@@ -177,7 +177,7 @@ class SimulationModel:
     """
     # TODO: complete class doc.
     def __init__(self, A, sector, C, p=0.1, damage_level=0.2, margin=0.1, k=9, gamma=0.5, tau=6, sigma=6, alpha=2,
-                 u=0.8, nb_iter=100):
+                 u=0.8, nb_iter=100, max_init_inventory=True, fixed_target_inventory=True):
         """Initializes the simulation model with the given data and parameters.
 
         If model parameters are not specified, default values are used.
@@ -218,7 +218,7 @@ class SimulationModel:
         nb_iter : int, optional
              The number of iterations (days) to run the simulation. (default is 100)
         """
-
+        # TODO: update doc
         # store network data
         self.A = np.copy(A)
         self.sector = np.copy(sector)
@@ -232,7 +232,8 @@ class SimulationModel:
         self.n = poisson.rvs(mu=k, size=self.dim())
         self.n[self.n <= 0] = 1  # always have some target value
         # dictionary with simulation parameters
-        self.param = {"gamma": gamma, "tau": tau, "sigma": sigma, "alpha": alpha, "nb_iter": nb_iter}
+        self.param = {"gamma": gamma, "tau": tau, "sigma": sigma, "alpha": alpha, "nb_iter": nb_iter,
+                      "max_init_inventory": max_init_inventory, "fixed_target_inventory": fixed_target_inventory}
 
         # vector with the amount of damage in each firm
         self.delta = self.disruption(p, damage_level, margin)
@@ -845,11 +846,13 @@ class SimulationModel:
         return S, days_neg_S
 
     def setup_inventory(self):
-        # TODO: add an option to choose whether initial inventory is max or random
-        # nb days of product each firm has in inventory at start
-        n_start = np.round(np.random.rand(self.dim()) * self.n)
-        n_start[n_start == 0] = 1  # always start with some inventory
-        #n_start = self.n
+        if self.param["max_init_inventory"]:
+            n_start = self.n
+        else:
+            # nb days of product each firm has in inventory at start
+            n_start = np.round(np.random.rand(self.dim()) * self.n)
+            n_start[n_start == 0] = 1  # always start with some inventory
+
         # S[i][j] : firm i has an inventory of the intermediate goods produced by firm j on day t
         S = np.transpose(n_start * np.transpose(self.A))
         return S
@@ -871,11 +874,10 @@ class SimulationModel:
         return total_supp_sorted, total_Pfree_sorted, Pfree_cumsum
 
     def target_inventory(self, D_star):
-        # TODO: add option to choose which formula is used
-        #target_S = np.transpose(self.n * np.transpose(self.A)) * D_star / self.Pini
-        target_S = np.transpose(self.n * np.transpose(self.A))
-        #print(D_star / self.Pini)
-        #print(np.sum(np.transpose(self.n * np.transpose(self.A)) - target_S),'\n')
+        if self.param["fixed_target_inventory"]:
+            target_S = np.transpose(self.n * np.transpose(self.A))
+        else:
+            target_S = np.transpose(self.n * np.transpose(self.A)) * D_star / self.Pini
         target_S[list(self.defaults.keys())] = np.zeros(self.dim())
         return target_S
 
