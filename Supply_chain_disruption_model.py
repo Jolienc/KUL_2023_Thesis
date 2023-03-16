@@ -4,21 +4,22 @@ import random
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from numpy.linalg import inv
 
 
 def generate_data(dim, nb_s):
-    """Generates an adjacency matrix, vector of daily trade volume to final consumers, and a vector specifying the
-    sector of each firm, for `dim` firms and `nb_s` sectors.
+    """Generates a signed adjacency matrix to calculate centrality, a positive adjacency matrix for the
+    supplier-customer relations, vector of daily trade volume to final consumers, and a vector specifying the sector
+    of each firm, for `dim` firms and `nb_s` sectors.
 
-    The matrices and vectors are randomly generated. Firm are not allowed to have themselves as supplier. Entries of
-    matrix A and vector C range between 0 and 100 in absolute value.
+    The matrices and vectors are randomly generated. Firm are not allowed to have themselves as supplier. The daily
+    trade volumes range between 0 and 100 in absolute value.
 
-    An entry of matrix A can have three possible meanings. If A[i][j] > 0, it is the daily trade volume from supplier j
-    to firm i, if A[i][j] < 0, it means firm j is a competitor of firm i (i.e., they belong to the same sector) and
-    abs(A[i][j]) is the average amount of daily trade volume firm j supplies to its clients, if A[i][j] = 0 and i != j,
-    it means that firm j is not a supplier of firm i and they are not competitors (either they are not in the same
-    sector, or j does not have any clients aside from the final consumers).
+    A[i,j] is the daily trade volume from supplier j to firm i.
+
+    Firms are competitors if they are in the same sector. If firm i and j are not competitors, adj[i,j] gives the
+    amount of daily trade volume firm j supplies to firm i. If firm i and j are competitors, adj[i,j] is the daily trade
+    volume from firm j to firm i minus the average amount of daily trade volume from firm i to its customers (excluding
+    firm j).
 
     Parameters
     ----------
@@ -30,16 +31,14 @@ def generate_data(dim, nb_s):
     Returns
     -------
     tuple
-        A tuple of numpy.arrays consisting of the signed adjacency matrix, the vector of daily trade volume to final
-        consumers, and the vector specifying the sector of each firm.
+        A tuple of numpy.arrays consisting of the signed adjacency matrix, a positive adjacency matrix for the
+        supplier-customer relations, the vector of daily trade volume to final consumers, and the vector specifying the
+        sector of each firm.
     """
-    # TODO: according to how A is formed, two firms in the same sector are not competitors if one supplies to the other
-    #  (or both do), but with how new suppliers are searched for, they actually would be competitors, since they are in
-    #  in the same sector
-    # TODO: when specifying the competitor relation, you should invert the indices. If A[i][j] > 0, firm i has the role
+    # when specifying the competitor relation, you should invert the indices. If A[i][j] > 0, firm i has the role
     #  of client/consumer, but if A[i][j] < 0, firm i has the role of supplier (and thus competitor to firm j), this
     #  will likely cause issues in the conceptual logic of the centrality score. Don't forget to update the doc after
-    #  changing this. (has been changed in calculation here, check whether correct and update the doc)
+    #  changing this. (has been changed in calculation here, update the doc)
     # assign sectors
     sector = random.choices(list(range(nb_s)), k=dim)
 
@@ -47,7 +46,7 @@ def generate_data(dim, nb_s):
     A = np.round(np.random.rand(dim, dim) * 100)
     for i in range(dim):
         # no self-link
-        A[i][i] = 0
+        A[i, i] = 0
         # break some links, otherwise the network is (almost) always complete
         # use a negatively skewed distribution to get a structure more similar to a scale-free network
         nb_break = int(np.round(skewnorm.rvs(a=-0.1*dim, loc=0.8*dim, scale=0.05*dim)))
@@ -57,42 +56,64 @@ def generate_data(dim, nb_s):
         # indices of links to break, exclude the self-link
         break_ind = random.sample(list(range(i)) + list(range(i + 1, dim)), nb_break)
         # set links to zero
-        A[i][break_ind] = 0
+        A[i, break_ind] = 0
 
-    # create negative connections
+    # create signed network
+    adj = np.copy(A)
     for i in range(dim):
-        # firm with which there is no supplier/client relation
-        ind_no_link = (A[i] == 0)
         # firms in the same sector are competitors
         ind_same_sec = (np.array(sector) == sector[i])
-        # indices of firms with which there is no link yet and who are in the same sector
-        ind_neg = np.array(range(dim))[ind_no_link * ind_same_sec]
+        ind_neg = np.array(range(dim))[ind_same_sec]
         # exclude self-link
         ind_neg = [el for el in ind_neg if el != i]
 
-        # number of clients each competitor has
-        nb_clients = np.sum(np.transpose(A)[ind_neg] > 0, axis=0)
+        # number of customers each competitor has (excluding focal firm)
+        nb_clients = np.sum(A[:i, ind_neg] > 0, axis=0)
+        nb_clients = nb_clients + np.sum(A[(i + 1):, ind_neg] > 0, axis=0)
         # replace zeros by ones to avoid division by zero
         denum = [k if k > 0 else 1 for k in nb_clients]
-        # the absolute value of the weight of a competitor link is the average amount of daily trade volume from the
-        # competitor to their clients
-        A = np.transpose(A)
-        A[i][ind_neg] = np.array(-1 * np.sum(np.transpose(A)[ind_neg], axis=0) / denum)[ind_neg]
-        A = np.transpose(A)
+        # the weight of a competitor link is the daily trade volume from the focal firm to this competitor (how much
+        # the competitor buys from the focal firm) minus the average amount of daily trade volume from the competitor
+        # to their customers (excluding focal firm)
+        trade_vol = np.sum(A[:i, ind_neg], axis=0)
+        trade_vol = trade_vol + np.sum(A[(i + 1):, ind_neg], axis=0)
+        adj[ind_neg, i] = adj[ind_neg, i] - trade_vol / np.array(denum)
 
     # C[i] : daily trade volume from firm i to the final consumers
     C = np.round(np.random.rand(dim) * 100)
 
-    return A, C, sector
+    return adj, A, C, sector
 
 
 def signed_to_positive(adj):
+    """Extracts the positive entries from a signed matrix.
+
+    Parameters
+    ----------
+    adj : numpy.array
+        A signed matrix.
+
+    Returns
+    -------
+    numpy.array
+        A matrix containing the positive entries of the input array, other entries are zero.
+    """
     pos_adj = np.copy(adj)
     pos_adj[pos_adj < 0] = 0
     return pos_adj
 
 
 def make_symmetric(adj):
+    """
+
+    Parameters
+    ----------
+    adj
+
+    Returns
+    -------
+
+    """
     # TODO: implement: input is the not-symmetric signed adjacency matrix, output is a symmetric version.
     # TODO (moved from generate_data function): the adjacency matrix is not symmetric in the negative entries, to make
     #  symmetric, you could take the average of the two entries A[i][j] = A[j][i] = (A_prev[i][j]+A_prev[i][j])/2. This
@@ -100,51 +121,8 @@ def make_symmetric(adj):
     print("TODO")
 
 
-def PN_score(adj, beta=None):
-    """Calculates the PN centrality score for each firm within the network.
-
-    If no value for `beta` is given, the optimal value as determined by [...] is used.
-
-    Parameters
-    ----------
-    adj : numpy.array
-        The signed adjacency matrix of the network.
-    beta : float, optional
-        The normalization factor. (default is None)
-
-    Returns
-    -------
-    numpy.array
-        A vector of PN centrality scores.
-    """
-    # TODO: add a reference to the original paper.
-    # TODO: does the matrix need to be ony -1 and 1, or are the daily trade volume values allowed?
-    # TODO: this is only for symmetric adjacency matrices, also implement for non-symmetric matrices?
-    P = np.copy(adj)
-    N = np.copy(adj)
-
-    P[P < 0] = 0
-    N[N > 0] = 0
-    N = -1 * N
-
-    A = P - 2 * N
-    n = A.shape[0]
-
-    ones = np.ones((n, 1))
-    identity = np.diag(np.ones(n))
-
-    if beta is None:
-        # beta = 1 / (2 * n - 2)
-        maxdegree = np.max((np.sum(A, axis=0), np.sum(A, axis=1)))
-        beta = 1 / (2 * maxdegree)
-
-    PN = inv(identity - beta * A) @ ones
-    return PN
-
-
 class SimulationModel:
-    """
-    Simulation model of a disruption on a supply chain network.
+    """Simulation model of a disruption on a supply chain network.
 
     Attributes
     ----------
@@ -186,9 +164,10 @@ class SimulationModel:
         Returns the production capacity of all firms throughout the simulation.
     nb_s()
         Returns the number of sectors in the network.
-    plot_capacity(relative=True, col_by_sector=True)
+    plot_capacity(relative=True, col_by_sector=False)
         Plots the production capacity throughout the simulation for all firms.
     """
+
     def __init__(self, A, sector, C, p=0.1, damage_level=0.2, margin=0.1, k=9, gamma=0.5, tau=6, sigma=6, alpha=2,
                  u=0.8, nb_iter=100, max_init_inventory=True, fixed_target_inventory=True):
         """Initializes the simulation model with the given data and parameters.
@@ -206,7 +185,7 @@ class SimulationModel:
         C : numpy.array
             The daily trade volume from firm i to the final consumers is C[i].
         p : float, optional
-            The percentage of firms that are damaged by the disruption. (default is 0.1)
+            The proportion (percentage/100) of firms that are damaged by the disruption. (default is 0.1)
         damage_level : float, optional
             The average amount of damage inflicted on affected firms. On average, (100*damage_level)% of the production
             capacity is damaged. (default is 0.2)
@@ -236,7 +215,6 @@ class SimulationModel:
              Whether the target inventory value is fixed or determined on the previous day's realized demand. (default
              is True)
         """
-
         # store network data
         self.A = np.copy(A)
         self.sector = np.copy(sector)
@@ -280,7 +258,6 @@ class SimulationModel:
         print_iter : boolean, optional
             Specifies whether to print the iteration number at the start of every iteration. (default is False)
         """
-
         # the initial realized demand of each firm
         # The realized demand in each firm i for the product of each other firm j is given by D_star[i][j]. This gives
         # the demand that has actually been met.
@@ -335,10 +312,92 @@ class SimulationModel:
             # update the damage
             self.__update_damage(Pmax, D)
 
+    def dim(self):
+        """Returns the number of firms in the network.
+
+        Returns
+        -------
+        int
+            The number of firms.
+        """
+        return self.A.shape[0]
+
+    def get_prod_capacity(self):
+        """Returns the production capacity of all firms throughout the simulation.
+
+        Row i is the production capacity at time i-1 for every firm, meaning row 0 is the production capacity before
+        the disruption and row 1 is the production capacity on the first day after the disruption (t=0). Column j is
+        the production capacity of firm j throughout the entire run.
+
+        Returns
+        -------
+        numpy.array
+            Matrix of the actual production capacity for each firm on each day.
+        """
+        return np.copy(self.prod_cap)
+
+    def nb_s(self):
+        """Returns the number of sectors in the network.
+
+        Returns
+        -------
+        int
+            The number of sectors
+        """
+        return len(set(self.sector))
+
+    def plot_capacity(self, relative=True, col_by_sector=False):
+        """Plots the production capacity throughout the simulation for all firms.
+
+        Parameters
+        ----------
+        relative : bool, optional
+            Whether the production capacity should be given in absolute values or relative to the initial production
+            capacity. (default is True)
+        col_by_sector : bool, optional
+            Whether the lines should be colored based on firm sector. (default is False)
+        """
+        x = list(range(self.param["nb_iter"] + 1))
+
+        # get relative production capacity
+        y = self.get_prod_capacity()
+        y_ax_title = "Actual production capacity"
+        if relative:
+            init_p = (self.param["nb_iter"] + 1) * [list(y[0])]  # [list(y[0])]
+            y = y / init_p
+            y_ax_title = "Relative production capacity"
+
+        # filter out firms that have always rel cap == 1
+        tr_y = np.transpose(y)
+        select_firms = np.array(range(self.dim()))
+        data = tr_y[select_firms]
+        firm_indices = np.array(range(self.dim()))[select_firms]
+
+        # build plot df
+        plot_df = pd.DataFrame(data.reshape(-1, 1), columns=["prod_cap"])
+        plot_df["x"] = x * len(firm_indices)
+        ind_start = 0
+        for ind in firm_indices:
+            plot_df.loc[ind_start:(ind_start + self.param["nb_iter"]), "sector"] = int(self.sector[ind])
+            plot_df.loc[ind_start:(ind_start + self.param["nb_iter"]), "firm"] = int(ind)
+            ind_start += self.param["nb_iter"] + 1
+
+        # plot
+        if col_by_sector:
+            fig = px.line(plot_df, x="x", y="prod_cap", color='sector', line_group="firm")
+
+        else:
+            fig = px.line(plot_df, x="x", y="prod_cap", color="firm")
+
+        fig.update_layout(
+            xaxis_title="t (days)",
+            yaxis_title=y_ax_title
+        )
+        fig.show()
+
     @staticmethod
     def __actual_capacity(D, Pmax):
-        """
-        Calculates the actual production capacity of a firm, based on the current maximum possible production capacity
+        """Calculates the actual production capacity of a firm, based on the current maximum possible production capacity
         and the demand.
 
         Parameters
@@ -485,10 +544,9 @@ class SimulationModel:
         -------
 
         """
-        # TODO: see explanation in overleaf doc wrt using a prob distr for robustness
         # lower and upper bound of current capacity utilization
-        lo_cap_util = np.max((0, u - 0.1))
-        hi_cap_util = np.min((1, u + 0.1))
+        lo_cap_util = np.max((0, u - 0.05))
+        hi_cap_util = np.min((1, u + 0.05))
         # for each firm generate a value for the current capacity utilization
         firm_cap_util = np.array(lo_cap_util + np.random.rand(self.dim()) * (hi_cap_util - lo_cap_util))
         # calculate the maximum possible capacity utilization
@@ -524,15 +582,6 @@ class SimulationModel:
         D = np.sum(O, axis=0) + self.C
         return D
 
-    def dim(self):
-        """
-        Returns
-        -------
-        int
-            The number of firms.
-        """
-        return self.A.shape[0]
-
     def __disruption(self, p, damage_level, margin):
         """
 
@@ -552,7 +601,6 @@ class SimulationModel:
         damaged_ind = random.sample(list(range(self.dim())), d)
         # delta [i] : proportion of the production capital of firm i is malfunctioning
         delta = np.zeros(self.dim())
-        # TODO: use a different formula to determine the amount of damage?
         # generate numbers between 0 and 1 with mean 0.5
         damage = np.random.rand(d)
         # transform to numbers between (damage_level - margin) and (damage_level + margin) with mean damage_level
@@ -623,15 +671,6 @@ class SimulationModel:
             # proportions
             self.A[i] += prop_trade_vol * (A_repl_not_covered + defaulted_vol)
         return firm_has_suppliers
-
-    def get_prod_capacity(self):
-        """
-
-        Returns
-        -------
-
-        """
-        return np.copy(self.prod_cap)
 
     def __group_failing_suppliers_by_sector(self, days_neg_S):
         """
@@ -714,15 +753,6 @@ class SimulationModel:
         Pmax = np.max((Pmax, np.zeros(Pmax.shape)), axis=0)
         return Pmax
 
-    def nb_s(self):
-        """
-        Returns
-        -------
-        int
-            The number of sectors
-        """
-        return len(set(self.sector))
-
     def __orders(self, target_S, S, D_star):
         """
 
@@ -741,120 +771,6 @@ class SimulationModel:
         O[O < 0] = 0
         O[list(self.defaults.keys())] = np.zeros(self.dim())
         return O
-
-    def plot_capacity(self, relative=True, col_by_sector=True):
-        """
-
-        Parameters
-        ----------
-        relative
-        col_by_sector
-
-        Returns
-        -------
-
-        """
-        # TODO: update notebook, also for the optional parameters wrt inventory setting
-        x = list(range(self.param["nb_iter"] + 1))
-
-        # get relative production capacity
-        y = self.get_prod_capacity()
-        y_ax_title = "Actual production capacity"
-        if relative:
-            init_p = (self.param["nb_iter"] + 1) * [list(y[0])]  # [list(y[0])]
-            y = y / init_p
-            y_ax_title = "Relative production capacity"
-
-        # filter out firms that have always rel cap == 1
-        tr_y = np.transpose(y)
-        select_firms = np.array(range(self.dim()))
-        data = tr_y[select_firms]
-        firm_indices = np.array(range(self.dim()))[select_firms]
-
-        # build plot df
-        plot_df = pd.DataFrame(data.reshape(-1, 1), columns=["rel_prod_cap"])
-        plot_df["x"] = x * len(firm_indices)
-        ind_start = 0
-        for ind in firm_indices:
-            plot_df.loc[ind_start:(ind_start + self.param["nb_iter"]), "sector"] = int(self.sector[ind])
-            plot_df.loc[ind_start:(ind_start + self.param["nb_iter"]), "firm"] = int(ind)
-            ind_start += self.param["nb_iter"] + 1
-
-        # plot
-        if col_by_sector:
-            fig = px.line(plot_df, x="x", y="rel_prod_cap", color='sector', line_group="firm")
-
-        else:
-            fig = px.line(plot_df, x="x", y="rel_prod_cap", color="firm")
-
-        fig.update_layout(
-            xaxis_title="t (days)",
-            yaxis_title=y_ax_title
-        )
-        fig.show()
-
-    def plot_act_capacity2(self, filter_firms=True, col_by_sector=True):
-        """
-
-        Parameters
-        ----------
-        filter_firms
-        col_by_sector
-
-        Returns
-        -------
-
-        """
-        x = list(range(self.param["nb_iter"] + 1))
-        y = self.get_prod_capacity()
-
-        if filter_firms:
-            # filter out firms that have always rel cap ==1
-            init_p = (self.param["nb_iter"] + 1) * [list(self.Pini)]  # [list(y[0])]
-            tr_y = np.transpose(y / init_p)
-            select_firms = (np.sum(np.array(tr_y) == 1, axis=1) != tr_y.shape[1])
-            y = np.transpose(np.transpose(y)[select_firms])
-            firm_indices = np.array(range(self.dim()))[select_firms]
-        else:
-            firm_indices = np.array(range(self.dim()))
-
-        if col_by_sector:
-            data = np.transpose(y)
-            fig = go.Figure()
-            leg_entry_set = set()
-            for i in range(self.dim()):
-                if self.sector[i] in leg_entry_set:
-                    showleg = False
-                else:
-                    showleg = True
-                fig.add_trace(go.Scatter(x=x, y=data[i], mode='lines', name=f'sector {self.sector[i]}',
-                                         line=dict(color=px.colors.qualitative.Plotly[self.sector[i]]),
-                                         showlegend=showleg, legendrank=self.sector[i]))
-                leg_entry_set.add(self.sector[i])
-        else:
-            df = pd.DataFrame(y, columns=["f" + str(el) for el in firm_indices])
-            df["t"] = x
-            long_df = pd.wide_to_long(df, "f", i="t", j="firm")
-            t, f = zip(*long_df.index)
-            long_df["t"] = list(t)
-            long_df["firm"] = list(f)
-
-            fig = px.line(long_df, x="t", y="f", color='firm')  # , markers=True
-
-        if filter_firms:
-            fig.update_layout(
-                xaxis_title="t (days)",
-                yaxis_title="Actual Production capacity",
-                showlegend=True
-            )
-        else:
-            fig.update_layout(
-                xaxis_title="t (days)",
-                yaxis_title="Actual Production capacity",
-                showlegend=False
-            )
-
-        fig.show()
 
     def __potential_suppliers_and_capacity(self, ind_not_i, sec, Pmax, Pact):
         """
@@ -908,7 +824,7 @@ class SimulationModel:
         O_star_T[ind_demand_met] = np.transpose(O)[ind_demand_met]
 
         # realized demand (demand not met)
-        target_S = self.__target_inventory(D_star)  # TODO: use different formula?
+        target_S = np.transpose(self.n * np.transpose(self.A))
         O_pre_disr = self.A + (1 / self.param["tau"]) * (target_S - S)
 
         for i in np.array(range(self.dim()))[ind_demand_not_met]:
@@ -1216,7 +1132,7 @@ class SimulationModel:
 
     def __update_inventory(self, D_star, O_star, S):
         """
-        
+
         Parameters
         ----------
         D_star
