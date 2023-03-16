@@ -3,7 +3,6 @@ from scipy.stats import poisson, skewnorm
 import random
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 
 
 def generate_data(dim, nb_s):
@@ -35,14 +34,10 @@ def generate_data(dim, nb_s):
         supplier-customer relations, the vector of daily trade volume to final consumers, and the vector specifying the
         sector of each firm.
     """
-    # when specifying the competitor relation, you should invert the indices. If A[i][j] > 0, firm i has the role
-    #  of client/consumer, but if A[i][j] < 0, firm i has the role of supplier (and thus competitor to firm j), this
-    #  will likely cause issues in the conceptual logic of the centrality score. Don't forget to update the doc after
-    #  changing this. (has been changed in calculation here, update the doc)
     # assign sectors
     sector = random.choices(list(range(nb_s)), k=dim)
 
-    # A[i][j] : the daily trade volume from supplier j to customer i
+    # A[i,j] : the daily trade volume from supplier j to customer i
     A = np.round(np.random.rand(dim, dim) * 100)
     for i in range(dim):
         # no self-link
@@ -50,9 +45,6 @@ def generate_data(dim, nb_s):
         # break some links, otherwise the network is (almost) always complete
         # use a negatively skewed distribution to get a structure more similar to a scale-free network
         nb_break = int(np.round(skewnorm.rvs(a=-0.1*dim, loc=0.8*dim, scale=0.05*dim)))
-        # random integer between 0 and (dim-2), you need at least one supplier and you can't be your own supplier
-        # nb_break = int(np.round(np.random.rand(1) * (dim - 2)))
-
         # indices of links to break, exclude the self-link
         break_ind = random.sample(list(range(i)) + list(range(i + 1, dim)), nb_break)
         # set links to zero
@@ -114,20 +106,19 @@ def make_symmetric(adj):
     -------
 
     """
-    # TODO: implement: input is the not-symmetric signed adjacency matrix, output is a symmetric version.
-    # TODO (moved from generate_data function): the adjacency matrix is not symmetric in the negative entries, to make
-    #  symmetric, you could take the average of the two entries A[i][j] = A[j][i] = (A_prev[i][j]+A_prev[i][j])/2. This
-    #  is not an issue for the simulation model, but it is for the calculation of the centrality score.
+    # TODO: implement: input is the not-symmetric signed adjacency matrix, output is a symmetric version (average?).
+    # TODO: write doc
     print("TODO")
 
 
+# TODO: finish writing doc for class methods
 class SimulationModel:
     """Simulation model of a disruption on a supply chain network.
 
     Attributes
     ----------
     A : numpy.array
-        Adjacency matrix of daily trade volume. A[i][j] is the daily trade volume from supplier j to firm i, or
+        Adjacency matrix of daily trade volume. A[i, j] is the daily trade volume from supplier j to firm i, or
         equivalently, the daily amount of product from supplier j that is used by firm i.
     C : numpy.array
         The daily trade volume from firm i to the final consumers is C[i].
@@ -177,7 +168,7 @@ class SimulationModel:
         Parameters
         ----------
         A : numpy.array
-            Adjacency matrix of daily trade volume. A[i][j] is the daily trade volume from supplier j to firm i, or
+            Adjacency matrix of daily trade volume. A[i, j] is the daily trade volume from supplier j to firm i, or
             equivalently, the daily amount of product from supplier j that is used by firm i.
         sector : numpy.array
             A vector specifying to which sector a firm belongs. Firm i belongs to the sector represented by index
@@ -259,7 +250,7 @@ class SimulationModel:
             Specifies whether to print the iteration number at the start of every iteration. (default is False)
         """
         # the initial realized demand of each firm
-        # The realized demand in each firm i for the product of each other firm j is given by D_star[i][j]. This gives
+        # The realized demand in each firm i for the product of each other firm j is given by D_star[i, j]. This gives
         # the demand that has actually been met.
         D_star = self.__init_capacity()
         # the initial inventory
@@ -268,7 +259,7 @@ class SimulationModel:
         O = self.__orders(self.__target_inventory(D_star), S, D_star)
         # the intial total consumption
         A_tot = self.__tot_consumption_sector()
-        # days_neg_S[i][j] : number of days firm i's inventory of product from firm j has been negative
+        # days_neg_S[i, j] : number of days firm i's inventory of product from firm j has been negative
         days_neg_S = np.zeros((self.dim(), self.dim()))
 
         for it in range(self.param["nb_iter"]):
@@ -278,7 +269,7 @@ class SimulationModel:
             # max production capacity limited by amount of damage and inventory
             Pmax = self.__max_capacity_tot(S, A_tot)
             # calculate the demand
-            # The demand in each firm i for the product of each other firm j is given by D[i][j].
+            # The demand in each firm i for the product of each other firm j is given by D[i, j].
             D = self.__demand(O)
             # calculate the actual production capacity
             Pact = self.__actual_capacity(D, Pmax)
@@ -397,13 +388,13 @@ class SimulationModel:
 
     @staticmethod
     def __actual_capacity(D, Pmax):
-        """Calculates the actual production capacity of a firm, based on the current maximum possible production capacity
-        and the demand.
+        """Calculates the actual production capacity of a firm, based on the current maximum possible production
+        capacity and the demand.
 
         Parameters
         ----------
         D : numpy.array
-            The demand in each firm i for the product of another firm j is given by D[i][j].
+            The demand in each firm i for the product of another firm j is given by D[i, j].
         Pmax : numpy.array
             The max production capacity limited by amount of damage and inventory.
         Returns
@@ -638,11 +629,11 @@ class SimulationModel:
             # daily trade volume.
             # first leave all of A_repl_not_covered with the to be replaced suppliers
             # divide it proportionally to the original amount of trade volume
-            self.A[i][supp_list] = A_repl_not_covered * self.A[i][supp_list] / A_repl
+            self.A[i, supp_list] = A_repl_not_covered * self.A[i, supp_list] / A_repl
             # fill out the free capacity of the selected suppliers
-            self.A[i][supp_sorted[0:last_needed_supp]] += Pfree_sorted[0:last_needed_supp]
+            self.A[i, supp_sorted[0:last_needed_supp]] += Pfree_sorted[0:last_needed_supp]
             volume_left = A_repl - A_repl_not_covered - Pfree_cumsum[last_needed_supp - 1]
-            self.A[i][supp_sorted[last_needed_supp]] += volume_left
+            self.A[i, supp_sorted[last_needed_supp]] += volume_left
         else:  # there are no potential suppliers available
             A_repl_not_covered = A_repl
 
@@ -656,8 +647,8 @@ class SimulationModel:
                 # but by setting A[i][j] to zero here, we ensure that no new trade volume will be attributed
                 # to the defaulted firm. Instead, the trade volume that would have been attributed to firm j
                 # is divided over the other firms in the below steps
-                defaulted_vol += self.A[i][j]
-                self.A[i][j] = 0
+                defaulted_vol += self.A[i, j]
+                self.A[i, j] = 0
 
         # calculate the proportional division of the trade volume over the suppliers
         total_trade_vol_no_default = np.sum(self.A[i])
@@ -666,7 +657,7 @@ class SimulationModel:
         if firm_has_suppliers:
             prop_trade_vol = self.A[i] / total_trade_vol_no_default
             # set the trade vol from the to be replace suppliers to zero
-            self.A[i][supp_list] = 0
+            self.A[i, supp_list] = 0
             # redivide A_repl_not_covered and the trade volume of the defaulted suppliers according to the trade volume
             # proportions
             self.A[i] += prop_trade_vol * (A_repl_not_covered + defaulted_vol)
@@ -960,7 +951,7 @@ class SimulationModel:
 
                 # sum the A_i,j between the firm and the to be replaced suppliers, this is what needs to be
                 # attributed to the new suppliers
-                A_repl = np.sum(self.A[i][supp_list])
+                A_repl = np.sum(self.A[i, supp_list])
 
                 if A_repl > 0:
                     # divide the trade volume over the potential suppliers
@@ -968,7 +959,7 @@ class SimulationModel:
                     if firm_has_suppliers:
                         # update the S matrix: divide the negative inventory over the new suppliers according to the new
                         # trade volume proportions
-                        S_rediv = np.sum(S[i][supp_list])
+                        S_rediv = np.sum(S[i, supp_list])
                         S[i][supp_list] = 0
                         new_prop_trade_vol = self.A[i] / np.sum(self.A[i])
                         S[i] += new_prop_trade_vol * S_rediv
@@ -1011,8 +1002,8 @@ class SimulationModel:
         # sort the potential suppliers to determine the new suppliers
         # sorted by decreasing Pfree
         indices = np.array(range(len(potential_supp)))
-        existing_ind = indices[self.A[i][potential_supp] > 0]
-        new_ind = indices[self.A[i][potential_supp] == 0]
+        existing_ind = indices[self.A[i, potential_supp] > 0]
+        new_ind = indices[self.A[i, potential_supp] == 0]
 
         existing_ind_sorted = sorted(existing_ind, key=lambda ind: Pfree[ind], reverse=True)
         new_ind_sorted = sorted(new_ind, key=lambda ind: Pfree[ind], reverse=True)
