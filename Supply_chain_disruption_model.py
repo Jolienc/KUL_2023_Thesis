@@ -155,10 +155,10 @@ class SimulationModel:
         Returns the production capacity of all firms throughout the simulation.
     nb_s()
         Returns the number of sectors in the network.
-    plot_capacity(relative=True, col_by_sector=False)
+    plot_capacity(relative=True, col_by_sector=False, show_leg=True)
         Plots the production capacity throughout the simulation for all firms.
     """
-
+    # TODO: update param attribute
     def __init__(self, A, sector, C, p=0.1, damage_level=0.2, margin=0.1, k=9, gamma=0.5, tau=6, sigma=6, alpha=2,
                  u=0.8, nb_iter=100, max_init_inventory=True, fixed_target_inventory=True):
         """Initializes the simulation model with the given data and parameters.
@@ -337,30 +337,20 @@ class SimulationModel:
         """
         return len(set(self.sector))
 
-    def plot_capacity(self, relative=True, col_by_sector=False):
-        """Plots the production capacity throughout the simulation for all firms.
-
-        Parameters
-        ----------
-        relative : bool, optional
-            Whether the production capacity should be given in absolute values or relative to the initial production
-            capacity. (default is True)
-        col_by_sector : bool, optional
-            Whether the lines should be colored based on firm sector. (default is False)
-        """
+    def get_plot_df(self, relative=True, select_firms=[]):
+        # TODO: update doc
         x = list(range(self.param["nb_iter"] + 1))
 
         # get relative production capacity
         y = self.get_prod_capacity()
-        y_ax_title = "Actual production capacity"
         if relative:
             init_p = (self.param["nb_iter"] + 1) * [list(y[0])]  # [list(y[0])]
             y = y / init_p
-            y_ax_title = "Relative production capacity"
 
-        # filter out firms that have always rel cap == 1
+        # filter firms
         tr_y = np.transpose(y)
-        select_firms = np.array(range(self.dim()))
+        if len(select_firms) == 0:
+            select_firms = np.array(range(self.dim()))
         data = tr_y[select_firms]
         firm_indices = np.array(range(self.dim()))[select_firms]
 
@@ -373,10 +363,31 @@ class SimulationModel:
             plot_df.loc[ind_start:(ind_start + self.param["nb_iter"]), "firm"] = int(ind)
             ind_start += self.param["nb_iter"] + 1
 
-        # plot
+        return plot_df.copy()
+
+    def plot_capacity(self, relative=True, col_by_sector=False, show_leg=True, select_firms=[]):
+        """Plots the production capacity throughout the simulation for all firms.
+
+        Parameters
+        ----------
+        show_leg : bool, optional
+            Whether to show the legend. (default is True)
+        relative : bool, optional
+            Whether the production capacity should be given in absolute values or relative to the initial production
+            capacity. (default is True)
+        col_by_sector : bool, optional
+            Whether the lines should be colored based on firm sector. (default is False)
+        """
+        # TODO: update method doc and class doc with select_firms param
+        plot_df = self.get_plot_df(relative=relative, select_firms=select_firms)
+
+        if relative:
+            y_ax_title = "Relative production capacity"
+        else:
+            y_ax_title = "Actual production capacity"
+
         if col_by_sector:
             fig = px.line(plot_df, x="x", y="prod_cap", color='sector', line_group="firm")
-
         else:
             fig = px.line(plot_df, x="x", y="prod_cap", color="firm")
 
@@ -384,6 +395,8 @@ class SimulationModel:
             xaxis_title="t (days)",
             yaxis_title=y_ax_title
         )
+        if not show_leg:
+            fig.update_layout(showlegend=False)
         fig.show()
 
     @staticmethod
