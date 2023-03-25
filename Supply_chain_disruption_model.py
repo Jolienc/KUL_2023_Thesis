@@ -151,7 +151,7 @@ class SimulationModel:
         Executes the simulation run.
     dim()
         Returns the number of firms in the network.
-    get_prod_capacity()
+    get_prod_capacity_arr()
         Returns the production capacity of all firms throughout the simulation.
     nb_s()
         Returns the number of sectors in the network.
@@ -313,7 +313,7 @@ class SimulationModel:
         """
         return self.A.shape[0]
 
-    def get_prod_capacity(self):
+    def get_prod_capacity_arr(self):
         """Returns the production capacity of all firms throughout the simulation.
 
         Row i is the production capacity at time i-1 for every firm, meaning row 0 is the production capacity before
@@ -337,15 +337,22 @@ class SimulationModel:
         """
         return len(set(self.sector))
 
-    def get_plot_df(self, relative=True, select_firms=[]):
+    def get_prod_capacity_df(self, relative=True, select_firms=[]):
         # TODO: update doc
         x = list(range(self.param["nb_iter"] + 1))
 
         # get relative production capacity
-        y = self.get_prod_capacity()
+        y = self.get_prod_capacity_arr()
         if relative:
             init_p = (self.param["nb_iter"] + 1) * [list(y[0])]  # [list(y[0])]
             y = y / init_p
+
+        if len(select_firms) == 0 or select_firms == "all":
+            select_firms = []
+        elif select_firms == "damaged":
+            select_firms = self.damaged_ind
+        elif select_firms == "not_damaged":
+            select_firms = sorted(list(set(range(self.dim())) - set(self.damaged_ind)))
 
         # filter firms
         tr_y = np.transpose(y)
@@ -354,16 +361,13 @@ class SimulationModel:
         data = tr_y[select_firms]
         firm_indices = np.array(range(self.dim()))[select_firms]
 
-        # build plot df
-        plot_df = pd.DataFrame(data.reshape(-1, 1), columns=["prod_cap"])
-        plot_df["x"] = x * len(firm_indices)
-        ind_start = 0
-        for ind in firm_indices:
-            plot_df.loc[ind_start:(ind_start + self.param["nb_iter"]), "sector"] = int(self.sector[ind])
-            plot_df.loc[ind_start:(ind_start + self.param["nb_iter"]), "firm"] = int(ind)
-            ind_start += self.param["nb_iter"] + 1
+        # build production capacity df
+        prod_cap_df = pd.DataFrame(data.reshape(-1, 1), columns=["prod_cap"])
+        prod_cap_df["x"] = x * len(firm_indices)
+        prod_cap_df["sector"] = np.repeat(self.sector[select_firms], self.param["nb_iter"] + 1).astype(int)
+        prod_cap_df["firm"] = np.repeat(select_firms, self.param["nb_iter"] + 1).astype(int)
 
-        return plot_df.copy()
+        return prod_cap_df
 
     def plot_capacity(self, relative=True, col_by_sector=False, show_leg=True, select_firms=[]):
         """Plots the production capacity throughout the simulation for all firms.
@@ -379,7 +383,7 @@ class SimulationModel:
             Whether the lines should be colored based on firm sector. (default is False)
         """
         # TODO: update method doc and class doc with select_firms param
-        plot_df = self.get_plot_df(relative=relative, select_firms=select_firms)
+        plot_df = self.get_prod_capacity_df(relative=relative, select_firms=select_firms)
 
         if relative:
             y_ax_title = "Relative production capacity"
