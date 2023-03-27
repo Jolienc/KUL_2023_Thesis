@@ -3,6 +3,8 @@ from scipy.stats import poisson, skewnorm
 import random
 import pandas as pd
 import plotly.express as px
+from operator import mul
+from functools import reduce
 
 
 def generate_data(dim, nb_s):
@@ -109,6 +111,98 @@ def make_symmetric(adj):
     # TODO: implement: input is the not-symmetric signed adjacency matrix, output is a symmetric version (average?).
     # TODO: write doc
     print("TODO")
+
+
+def build_setup_df(param_dict):
+    nb_exp = reduce(mul, [len(par_list) for par, par_list in param_dict.items() if np.ndim(par_list) > 0], 1)
+
+    setup = pd.DataFrame(columns=list(param_dict.keys()))
+    fact = 1
+    first = True
+    for par, values in param_dict.items():
+        if first and np.ndim(values) > 0:
+            setup[par] = np.repeat(values, nb_exp / len(values))
+            fact *= len(values)
+            first = False
+        elif np.ndim(values) > 0:
+            setup[par] = np.repeat([np.repeat(values, nb_exp / fact / len(values))], fact, axis=0).reshape(-1, 1)
+            fact *= len(values)
+        else:
+            setup[par] = values
+            first = False
+
+    setup["setup_nb"] = range(setup.shape[0])
+
+    return setup
+
+
+def process_simulation_output(mdl):
+    prodcap_df = mdl.get_prod_capacity_df(relative=True)
+
+    prodcap_df["prod_loss"] = 1 - prodcap_df["prod_cap"]
+    df_filtered = prodcap_df[prodcap_df["prod_loss"] >= 0].copy()
+
+    df = df_filtered.groupby("firm")["prod_loss"].sum().to_frame()
+    df.reset_index(inplace=True)
+    df["avg_prod_loss"] = df["prod_loss"] / (mdl.param["nb_iter"] + 1)
+    df = df.merge(pd.DataFrame(np.transpose([mdl.sector, np.array(range(mdl.dim()))]), columns=["sector", "firm"]),
+                  on='firm')
+    df = df[['firm', 'sector', 'avg_prod_loss']]
+
+    damaged = np.zeros(mdl.dim()).astype(int)
+    damaged[mdl.damaged_ind] = 1
+    defaulted = np.zeros(mdl.dim()).astype(int)
+    defaulted[list(mdl.defaults.keys())] = 1
+    df["damaged"] = damaged
+    df["defaulted"] = defaulted
+
+    return df
+
+
+def run_simulation_batch(A, C, sector, setup_file_path, save_file_path, nb_rep=5, print_status=False):
+    sim_setup = pd.read_csv(setup_file_path)
+    setup_nbs = sim_setup["setup_nb"]
+    sim_setup = sim_setup.drop("setup_nb", axis=1)
+
+    for i in range(sim_setup.shape[0]):
+        if print_status:
+            print(f"setup {i + 1}/{sim_setup.shape[0]}")
+
+        param = dict(sim_setup.loc[i])
+
+        for j in range(nb_rep):
+            if print_status:
+                print(f"    rep {j + 1}/{nb_rep}")
+
+            mdl = SimulationModel(A, sector, C, **param)
+            mdl.run_simulation(print_iter=False)
+
+            df = process_simulation_output(mdl)
+
+            df["setup_nb"] = setup_nbs.loc[i]
+            df["rep"] = j
+
+            if i == 0 and j == 0:
+                df.to_csv(save_file_path, index=False, header=True)
+            else:
+                df.to_csv(save_file_path, mode='a', index=False, header=False)
+
+
+def process_batch_data(results_file_path, setup_file_path):
+    # load the data
+    df = pd.read_csv(results_file_path)
+    # filter out the damaged firms
+    df = df[df["damaged"] == 0]
+
+    # take average over the replications (per firm)
+    df = df.groupby(["firm", "sector", "setup_nb"])["avg_prod_loss"].mean().to_frame()
+    df.reset_index(inplace=True)
+
+    # add the parameter values per simulation output
+    sim_setup = pd.read_csv(setup_file_path)
+    df = df.merge(sim_setup, on='setup_nb')
+
+    return df
 
 
 # TODO: finish writing doc for class methods
