@@ -117,6 +117,8 @@ def build_setup_df(param_dict):
     nb_exp = reduce(mul, [len(par_list) for par, par_list in param_dict.items() if np.ndim(par_list) > 0], 1)
 
     setup = pd.DataFrame(columns=list(param_dict.keys()))
+    setup["setup_nb"] = range(nb_exp)
+    
     fact = 1
     first = True
     for par, values in param_dict.items():
@@ -130,8 +132,6 @@ def build_setup_df(param_dict):
         else:
             setup[par] = values
             first = False
-
-    setup["setup_nb"] = range(setup.shape[0])
 
     return setup
 
