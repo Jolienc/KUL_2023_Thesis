@@ -114,11 +114,21 @@ def make_symmetric(adj):
 
 
 def build_setup_df(param_dict):
+    """
+
+    Parameters
+    ----------
+    param_dict
+
+    Returns
+    -------
+
+    """
     nb_exp = reduce(mul, [len(par_list) for par, par_list in param_dict.items() if np.ndim(par_list) > 0], 1)
 
     setup = pd.DataFrame(columns=list(param_dict.keys()))
     setup["setup_nb"] = range(nb_exp)
-    
+
     fact = 1
     first = True
     for par, values in param_dict.items():
@@ -137,6 +147,16 @@ def build_setup_df(param_dict):
 
 
 def process_simulation_output(mdl):
+    """
+
+    Parameters
+    ----------
+    mdl
+
+    Returns
+    -------
+
+    """
     prodcap_df = mdl.get_prod_capacity_df(relative=True)
 
     prodcap_df["prod_loss"] = 1 - prodcap_df["prod_cap"]
@@ -160,6 +180,22 @@ def process_simulation_output(mdl):
 
 
 def run_simulation_batch(A, C, sector, setup_file_path, save_file_path, nb_rep=5, print_status=False):
+    """
+
+    Parameters
+    ----------
+    A
+    C
+    sector
+    setup_file_path
+    save_file_path
+    nb_rep
+    print_status
+
+    Returns
+    -------
+
+    """
     sim_setup = pd.read_csv(setup_file_path)
     setup_nbs = sim_setup["setup_nb"]
     sim_setup = sim_setup.drop("setup_nb", axis=1)
@@ -189,6 +225,17 @@ def run_simulation_batch(A, C, sector, setup_file_path, save_file_path, nb_rep=5
 
 
 def process_batch_data(results_file_path, setup_file_path):
+    """
+    
+    Parameters
+    ----------
+    results_file_path
+    setup_file_path
+
+    Returns
+    -------
+
+    """
     # load the data
     df = pd.read_csv(results_file_path)
     # filter out the damaged firms

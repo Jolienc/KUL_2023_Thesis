@@ -1,8 +1,13 @@
 from numpy.linalg import inv
 import numpy as np
+import networkx as nx
+import pandas as pd
 
 
 def PN_score(adj, beta=None):
+    # TODO: instead of inputting the combined adjacency matrix, input the positive and negative matrices separately.
+    #  Then there's no need to combine values if a negative and positive value need to be put in the same place in the
+    #  matrix.
     """Calculates the PN centrality score for each firm within the network.
 
     If no value for `beta` is given, the optimal value as determined by [...] is used.
@@ -41,5 +46,15 @@ def PN_score(adj, beta=None):
         beta = 1 / (2 * maxdegree)
 
     scores = inv(identity - beta * A) @ ones
-    return scores
+    return scores.reshape(1, -1)[0]
 
+
+def eigenv_score(A):
+    G = nx.from_numpy_array(A)
+    centrality = nx.eigenvector_centrality(G)
+    # df = pd.DataFrame([[v, c] for v, c in centrality.items()], columns=["firm","eigenv_score"])
+    # sort by firm index
+    sorted_list = sorted([[v, c] for v, c in centrality.items()], key=lambda tup: tup[0])
+    # extract centrality scores
+    scores = np.transpose(sorted_list)[1]
+    return scores
