@@ -40,20 +40,20 @@ def generate_data(dim, nb_s):
     sector = random.choices(list(range(nb_s)), k=dim)
 
     # A[i,j] : the daily trade volume from supplier j to customer i
-    A = np.round(np.random.rand(dim, dim) * 100)
+    P = np.round(np.random.rand(dim, dim) * 100)
     for i in range(dim):
         # no self-link
-        A[i, i] = 0
+        P[i, i] = 0
         # break some links, otherwise the network is (almost) always complete
         # use a negatively skewed distribution to get a structure more similar to a scale-free network
         nb_break = int(np.round(skewnorm.rvs(a=-0.1*dim, loc=0.8*dim, scale=0.05*dim)))
         # indices of links to break, exclude the self-link
         break_ind = random.sample(list(range(i)) + list(range(i + 1, dim)), nb_break)
         # set links to zero
-        A[i, break_ind] = 0
+        P[i, break_ind] = 0
 
     # create signed network
-    adj = np.copy(A)
+    N = np.zeros(P.shape)
     for i in range(dim):
         # firms in the same sector are competitors
         ind_same_sec = (np.array(sector) == sector[i])
@@ -62,21 +62,19 @@ def generate_data(dim, nb_s):
         ind_neg = [el for el in ind_neg if el != i]
 
         # number of customers each competitor has (excluding focal firm)
-        nb_clients = np.sum(A[:i, ind_neg] > 0, axis=0)
-        nb_clients = nb_clients + np.sum(A[(i + 1):, ind_neg] > 0, axis=0)
+        nb_clients = np.sum(P[:i, ind_neg] > 0, axis=0) + np.sum(P[(i + 1):, ind_neg] > 0, axis=0)
         # replace zeros by ones to avoid division by zero
         denum = [k if k > 0 else 1 for k in nb_clients]
         # the weight of a competitor link is the daily trade volume from the focal firm to this competitor (how much
         # the competitor buys from the focal firm) minus the average amount of daily trade volume from the competitor
         # to their customers (excluding focal firm)
-        trade_vol = np.sum(A[:i, ind_neg], axis=0)
-        trade_vol = trade_vol + np.sum(A[(i + 1):, ind_neg], axis=0)
-        adj[ind_neg, i] = adj[ind_neg, i] - trade_vol / np.array(denum)
+        trade_vol = np.sum(P[:i, ind_neg], axis=0) + np.sum(P[(i + 1):, ind_neg], axis=0)
+        N[ind_neg, i] = - trade_vol / np.array(denum)
 
     # C[i] : daily trade volume from firm i to the final consumers
     C = np.round(np.random.rand(dim) * 100)
 
-    return adj, A, C, sector
+    return P, N, C, sector  # TODO: update doc
 
 
 def signed_to_positive(adj):
@@ -300,7 +298,7 @@ class SimulationModel:
         Plots the production capacity throughout the simulation for all firms.
     """
     # TODO: update param attribute
-    def __init__(self, A, sector, C, p=0.1, damage_level=0.2, margin=0.1, k=9, gamma=0.5, tau=6, sigma=6, alpha=2,
+    def __init__(self, A, sector, C, p=0.1, damage_level=0.2, margin=0.1, k=9, gamma=0.025, tau=6, sigma=6, alpha=2,
                  u=0.8, nb_iter=100, max_init_inventory=True, fixed_target_inventory=True):
         """Initializes the simulation model with the given data and parameters.
 
@@ -328,7 +326,7 @@ class SimulationModel:
         k : float, optional
             The average target inventory of a firm, specified as number of days of product use. (default is 9)
         gamma : float, optional
-            The recovery rate of damaged firms. (default is 0.5)
+            The recovery rate of damaged firms. (default is 0.025)
         tau : float, optional
             The number of days over which the inventory is restored to the target value. (default is 6)
         sigma : float, optional
@@ -1034,13 +1032,10 @@ class SimulationModel:
         -------
 
         """
-        # if a firm has a realized demand of zero, remove it from the network, how to deal with the customers?
-        # A entries for the to be removed firm are set to zero, the inventory of product of this firm is set to zero
-        # if there was a negative supply in S, it is divided over other suppliers in the same sector. if there was
-        # a positive amount of inventory, then what?
-        #  done: idea, remove dependence in A of the to be removed firm on the staying firms, leave the dependence of
-        #  the remaining firms on the to be removed firms. Set Pini and Pini_full_util to zero for the to be removed
-        #  firms, set the inventory in possession of the to be removed firms to zero
+        # if a firm has a realized demand of zero, remove it from the network
+        # remove dependence in A of the to be removed firm on the staying firms, leave the dependence of
+        # the remaining firms on the to be removed firms. Set Pini and Pini_full_util to zero for the to be removed
+        # firms, set the inventory in possession of the to be removed firms to zero
 
         ind_firms_repl = np.array(range(self.dim()))[Pact <= 0]
         # filter out firms that have already defaulted and been removed

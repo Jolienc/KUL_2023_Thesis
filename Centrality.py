@@ -4,18 +4,18 @@ import networkx as nx
 import pandas as pd
 
 
-def PN_score(adj, beta=None):
-    # TODO: instead of inputting the combined adjacency matrix, input the positive and negative matrices separately.
-    #  Then there's no need to combine values if a negative and positive value need to be put in the same place in the
-    #  matrix.
+def PN_score(P, N, beta=None):
     """Calculates the PN centrality score for each firm within the network.
 
     If no value for `beta` is given, the optimal value as determined by [...] is used.
+    The entries for `N` should be non-positive.
 
     Parameters
     ----------
-    adj : numpy.array
-        The signed adjacency matrix of the network.
+    P : numpy.array
+        Matrix of positive links.
+    N : numpy array
+        Matrix of negative links.
     beta : float, optional
         The normalization factor. (default is None)
 
@@ -27,14 +27,8 @@ def PN_score(adj, beta=None):
     # TODO: add a reference to the original paper.
     # TODO: does the matrix need to be ony -1 and 1, or are the daily trade volume values allowed?
     # TODO: this is only for symmetric adjacency matrices, also implement for non-symmetric matrices?
-    P = np.copy(adj)
-    N = np.copy(adj)
-
-    P[P < 0] = 0
-    N[N > 0] = 0
-    N = -1 * N
-
-    A = P - 2 * N
+    # entries of P are positive or zero, entries of N are negative or zero
+    A = P + 2 * N
     n = A.shape[0]
 
     ones = np.ones((n, 1))
